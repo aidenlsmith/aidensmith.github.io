@@ -1,0 +1,186 @@
+
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEClient.h>
+#include <BLEAdvertisedDevice.h>
+#include <BLE2902.h>
+#include <vector>
+// UART0 for hub-to-hub
+#define SERIAL_BAUD    115200
+#define SERIAL_RX_PIN  GPIO_NUM_3  // RX0
+#define SERIAL_TX_PIN  GPIO_NUM_1  // TX0
+// Mode switch (drive vs input)
+#define SWITCH_DRIVE_PIN GPIO_NUM_4
+#define SWITCH_INPUT_PIN GPIO_NUM_2
+// Status LED (onboard)
+#define STATUS_LED_PIN   GPIO_NUM_25
+const unsigned long BLINK_INTERVAL = 500;
+// BLE service & characteristic UUIDs
+#define SERVICE_UUID   "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHAR_UUID1     "beb5483e-36e1-4688-b7f5-ea07361b26a8"  // Slave 1
+#define CHAR_UUID2     "d2f12345-89ab-4cde-b012-3456789abcde" // Slave 2
+// Stroke detection parameters
+#define ACCEL_THRESHOLD   -0.2f
+#define MIN_STABLE_COUNT    3
+// — only t, roll, accel now —
+struct DataPoint { float t, roll, accel; };
+static std::vector<std::vector<DataPoint>> strokes, leadStrokes;
+static std::vector<DataPoint>               currentStroke;
+static bool                                 strokeInProgress = false;
+static int                                  accelAboveCount  = 0;
+// hub mode
+bool            isLeadHub   = false;
+unsigned long   lastBlink   = 0;
+bool            ledState    = false;
+// BLE globals
+static BLEAdvertisedDevice*     found1  = nullptr;
+static BLEAdvertisedDevice*     found2  = nullptr;
+static BLEClient*               client1 = nullptr;
+static BLEClient*               client2 = nullptr;
+static BLERemoteCharacteristic* rc1     = nullptr;
+static BLERemoteCharacteristic* rc2     = nullptr;
+// stash last reading from each slave
+struct SensorData { float roll, accel; bool valid; };
+static SensorData s1{0,0,false}, s2{0,0,false};
+//----------------------------------------------------------------------
+// Scan callback: match SERVICE_UUID only
+//----------------------------------------------------------------------
+class ScanCB : public BLEAdvertisedDeviceCallbacks {
+  void onResult(BLEAdvertisedDevice adv) override {
+    if (!adv.haveServiceUUID() ||
+        !adv.isAdvertisingService(BLEUUID(SERVICE_UUID)))
+      return;
+    // first ESP32-Slave1 we see:
+    if (!found1 && adv.getName() == "ESP32-Slave1") {
+      found1 = new BLEAdvertisedDevice(adv);
+      Serial.print("[FOUND] Slave 1 @ ");
+      Serial.println(adv.getAddress().toString().c_str());
+    }
+    // then ESP32-Slave2
+    else if (!found2 && adv.getName() == "ESP32-Slave2") {
+      found2 = new BLEAdvertisedDevice(adv);
+      Serial.print("[FOUND] Slave 2 @ ");
+      Serial.println(adv.getAddress().toString().c_str());
+      BLEDevice::getScan()->stop();
+    }
+  }
+};
+//----------------------------------------------------------------------
+// Notification parser + stroke logic
+//----------------------------------------------------------------------
+static void notifyCB(BLERemoteCharacteristic* rc,
+                     uint8_t* data, size_t len, bool)
+{
+  // 1) Print every notification on its own line:
+  String msg = String((char*)data).substring(0, len);
+  String tag = (rc == rc1 ? "[S1] " : "[S2] ");
+  Serial.println(tag + msg);
+  // 2) Parse out R: and A:
+  int iR = msg.indexOf("R:");
+  int iA = msg.indexOf("A:");
+  float R = 0, A = 0;
+  if (iR >= 0) R = msg.substring(iR + 2, msg.indexOf(';', iR)).toFloat();
+  if (iA >= 0) A = msg.substring(iA + 2).toFloat();
+  // 3) Stash into s1 or s2
+  if (rc == rc1) s1 = {R, A, true};
+  else           s2 = {R, A, true};
+  // 4) Once both have valid readings, do stroke detection
+  if (s1.valid && s2.valid) {
+    float t    = millis() / 1000.0f;
+    float avgR = (s1.roll  + s2.roll ) * 0.5f;
+    float avgA = (s1.accel + s2.accel) * 0.5f;
+    if (avgA > ACCEL_THRESHOLD) {
+      accelAboveCount++;
+    } else {
+      // acceleration flipped -> end of stroke
+      accelAboveCount = 0;
+      if (strokeInProgress) {
+        strokes.push_back(currentStroke);
+        Serial.println("STROKE_START");
+        for (auto &d : currentStroke)
+          Serial.printf("%.2f,%.2f,%.2f\n", d.t, d.roll, d.accel);
+        Serial.println("STROKE_END");
+        currentStroke.clear();
+        strokeInProgress = false;
+      }
+    }
+    // start new stroke?
+    if (!strokeInProgress && accelAboveCount >= MIN_STABLE_COUNT)
+      strokeInProgress = true;
+    // record while in stroke
+    if (strokeInProgress)
+      currentStroke.push_back({t, avgR, avgA});
+    // reset for next cycle
+    s1.valid = s2.valid = false;
+  }
+  // 5) blink status LED if disconnected (lead only)
+  if (isLeadHub) {
+    bool ok1 = client1 && client1->isConnected();
+    bool ok2 = client2 && client2->isConnected();
+    unsigned long now = millis();
+    if (ok1 && ok2) {
+      digitalWrite(STATUS_LED_PIN, HIGH);
+    } else if (now - lastBlink >= BLINK_INTERVAL) {
+      lastBlink = now;
+      ledState  = !ledState;
+      digitalWrite(STATUS_LED_PIN, ledState);
+    }
+  }
+}
+// stub for follower mode (unchanged)
+void receiveStrokes() {
+  // … your existing follower UART chaining here …
+}
+//----------------------------------------------------------------------
+// setup()
+//----------------------------------------------------------------------
+void setup() {
+  Serial.begin(SERIAL_BAUD,
+               SERIAL_8N1,
+               SERIAL_RX_PIN,
+               SERIAL_TX_PIN);
+  delay(200);
+  pinMode(SWITCH_DRIVE_PIN, OUTPUT);
+  digitalWrite(SWITCH_DRIVE_PIN, HIGH);
+  pinMode(SWITCH_INPUT_PIN, INPUT_PULLDOWN);
+  delay(50);
+  isLeadHub = digitalRead(SWITCH_INPUT_PIN);
+  Serial.printf("[MODE] %s Hub\n", isLeadHub ? "Lead" : "Follow");
+  pinMode(STATUS_LED_PIN, OUTPUT);
+  // initial BLE scan
+  Serial.println("[SCAN] for two slaves…");
+  BLEDevice::init("ESP32-Hub");
+  BLEScan* sc = BLEDevice::getScan();
+  sc->setAdvertisedDeviceCallbacks(new ScanCB());
+  sc->setActiveScan(true);
+  sc->start(10, false);
+  while (!found1 || !found2) delay(50);
+  // connect Slave 1
+  Serial.println("[CONNECT] Slave 1…");
+  client1 = BLEDevice::createClient();
+  if (client1->connect(found1)) {
+    rc1 = client1->getService(SERVICE_UUID)
+               ->getCharacteristic(BLEUUID(CHAR_UUID1));
+    rc1->registerForNotify(notifyCB);
+    Serial.println("[CONNECT] Slave 1 OK");
+  }
+  // connect Slave 2
+  Serial.println("[CONNECT] Slave 2…");
+  client2 = BLEDevice::createClient();
+  if (client2->connect(found2)) {
+    rc2 = client2->getService(SERVICE_UUID)
+               ->getCharacteristic(BLEUUID(CHAR_UUID2));
+    rc2->registerForNotify(notifyCB);
+    Serial.println("[CONNECT] Slave 2 OK");
+  }
+  Serial.println("[READY] IMU data…");
+}
+//----------------------------------------------------------------------
+// loop()
+//----------------------------------------------------------------------
+void loop() {
+  if (!isLeadHub) {
+    receiveStrokes();
+  }
+  delay(10);
+}

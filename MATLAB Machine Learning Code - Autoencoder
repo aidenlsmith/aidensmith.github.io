@@ -1,0 +1,99 @@
+% BLE_ESP_AI.m
+% Connects to ESP32-MasterTest, polls for "ROLL:raw,adj" messages for a specified duration,
+% stores them, and then plots raw vs. adjusted roll automatically,
+% followed by an unsupervised autoencoder anomaly detection.
+%% UUIDs must match your master sketch
+OUT_SVC   = "12345678-1234-5678-1234-56789abcdef0";
+OUT_CHAR  = "abcdef01-1234-5678-1234-56789abcdef0";
+%% 1) Ask for recording duration
+recordTime = input('Enter recording duration in seconds: ');
+%% 2) Connect to the master
+disp("Scanning and connecting to ESP32-MasterTest...");
+master = ble("ESP32-MasterTest");  
+disp("Connected.");
+%% 3) Open the output characteristic
+ch = characteristic(master, OUT_SVC, OUT_CHAR);
+disp("Characteristic opened. Now polling for notifications...");
+%% 4) Prepare storage
+messages   = {};              % cell array of raw strings
+timestamps = datetime.empty;  % parallel array of timestamps
+rawVals    = [];              % numeric array of raw roll values
+adjVals    = [];              % numeric array of adjusted roll values
+%% 5) Poll loop for fixed duration
+t0 = tic;
+while toc(t0) < recordTime
+    data = read(ch);          % [] if nothing new
+    if ~isempty(data)
+        msg = char(data');    % ensure a char row vector, e.g. "ROLL:3.1,0.0"
+        ts  = datetime("now");
+        % manual parsing without split/regexp
+        ci = find(msg == ':', 1, 'first');
+        if isempty(ci), continue; end
+        numstr   = msg(ci+1:end);         % e.g. "3.1,0.0"
+        commaIdx = find(numstr == ',', 1, 'first');
+        if isempty(commaIdx), continue; end
+        rawStr = numstr(1:commaIdx-1);
+        adjStr = numstr(commaIdx+1:end);
+        raw    = str2double(rawStr);
+        adj    = str2double(adjStr);
+        % store
+        messages{end+1}   = msg;
+        timestamps(end+1) = ts;
+        rawVals(end+1)    = raw;
+        adjVals(end+1)    = adj;
+        % echo
+        fprintf("%s  →  %s   (raw=%.1f, adj=%.1f)\n", ...
+                datestr(ts,"HH:MM:SS.FFF"), msg, raw, adj);
+    end
+    pause(0.1);               % wait 100 ms
+end
+%% 6) Plot raw vs. adjusted roll
+figure('Name','Roll vs Time','NumberTitle','off');
+plot(timestamps, rawVals, '-o', timestamps, adjVals, '-x','LineWidth',1.5);
+legend('Raw Roll','Adjusted Roll','Location','best');
+xlabel('Time');
+ylabel('Roll (°)');
+title(sprintf('Recorded %.1f seconds of data', recordTime));
+grid on;
+%% 7) Save to CSV
+T = table(timestamps', rawVals', adjVals', ...
+          'VariableNames',{'Time','RawRoll','AdjRoll'});
+writetable(T,'roll_data.csv');
+disp('Data saved to roll_data.csv');
+%% 8) — Anomaly detection via autoencoder —
+% Normalize adjusted roll to zero mean, unit variance
+mu    = mean(adjVals);
+sigma = std(adjVals);
+Xnorm = (adjVals - mu) / sigma;
+% Train a shallow autoencoder on the single sequence
+hiddenSize = 10;
+autoenc = trainAutoencoder( ...
+  Xnorm', ...                       % features×observations
+  hiddenSize, ...
+  'L2WeightRegularization',0.001, ...
+  'SparsityRegularization',4, ...
+  'SparsityProportion',0.05, ...
+  'DecoderTransferFunction','purelin');
+% Reconstruct and compute MSE per sample
+Xrec = predict(autoenc, Xnorm');
+mse  = (Xnorm' - Xrec).^2;
+% Plot reconstruction error and mark anomalies
+thr = mean(mse) + 3*std(mse);
+figure('Name','Anomaly Detection','NumberTitle','off');
+plot(timestamps, mse, '-o','MarkerSize',4); hold on;
+yline(thr,'r--','Threshold');
+datetick('x','HH:MM:SS');
+xlabel('Time'); ylabel('Reconstruction Error');
+title('Autoencoder Anomaly Scores');
+legend('Error','3σ Threshold','Location','best');
+grid on;
+% Highlight anomalies on the original plot
+anoms = mse > thr;
+figure('Name','Adjusted Roll with Anomalies','NumberTitle','off');
+plot(timestamps, adjVals, '-b'); hold on;
+scatter(timestamps(anoms), adjVals(anoms), 'ro','filled');
+xlabel('Time'); ylabel('Adjusted Roll (°)');
+title('Detected Anomalies in Roll');
+datetick('x','HH:MM:SS');
+legend('Adj Roll','Anomaly','Location','best');
+grid on;
