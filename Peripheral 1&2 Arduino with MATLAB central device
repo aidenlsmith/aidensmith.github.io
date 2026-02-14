@@ -1,0 +1,148 @@
+% BLE_ESP_AI_dualSlaves.m
+% Connects to ESP32-MasterRelay, polls for "[S1]/[S2] ROLL:raw,adj" messages for a specified duration,
+% stores data separately for each slave, and then plots raw vs. adjusted roll for both,
+% followed by per-slave autoencoder anomaly detection.
+%% UUIDs must match your master sketch
+OUT_SVC   = "12345678-1234-5678-1234-56789abcdef0";
+OUT_CHAR  = "abcdef01-1234-5678-1234-56789abcdef0";
+%% 1) Ask for recording duration
+recordTime = input('Enter recording duration in seconds: ');
+%% 2) Connect to the master
+disp("Scanning and connecting to ESP32-MasterRelay...");
+master = ble("ESP32-MasterRelay");
+disp("Connected.");
+%% 3) Open the output characteristic
+ch = characteristic(master, OUT_SVC, OUT_CHAR);
+disp("Characteristic opened. Now polling for notifications...");
+%% 4) Prepare storage for two slaves
+messages1   = {};              % S1 raw strings
+timestamps1 = datetime.empty;  % S1 timestamps
+raw1        = [];              % S1 raw roll
+adj1        = [];              % S1 adjusted roll
+messages2   = {};              % S2 raw strings
+timestamps2 = datetime.empty;  % S2 timestamps
+raw2        = [];              % S2 raw roll
+adj2        = [];              % S2 adjusted roll
+%% 5) Poll loop for fixed duration
+t0 = tic;
+while toc(t0) < recordTime
+    data = read(ch);          % [] if nothing new
+    if ~isempty(data)
+        % --- Force to single 1xN char array ---
+        msg = char(data');    % may be NxM before reshape
+        txt = reshape(msg,1,[]);  
+        ts  = datetime("now");
+        % Parse "[S1]" or "[S2]" prefix
+        tok = regexp(txt, '\[S([12])\]\s*ROLL:([-\d\.]+),([-\d\.]+)', 'tokens');
+        if isempty(tok)
+            % fallback: bare "ROLL:raw,adj" → assume Slave 2
+            tok2 = regexp(txt,'ROLL:([-\d\.]+),([-\d\.]+)','tokens');
+            if isempty(tok2)
+                continue;
+            end
+            sid    = '2';
+            rawVal = str2double(tok2{1}{1});
+            adjVal = str2double(tok2{1}{2});
+        else
+            sid    = tok{1}{1};               % '1' or '2'
+            rawVal = str2double(tok{1}{2});
+            adjVal = str2double(tok{1}{3});
+        end
+        % Store into the correct buffers
+        switch sid
+            case '1'
+                messages1{end+1}   = txt;
+                timestamps1(end+1) = ts;
+                raw1(end+1)        = rawVal;
+                adj1(end+1)        = adjVal;
+            case '2'
+                messages2{end+1}   = txt;
+                timestamps2(end+1) = ts;
+                raw2(end+1)        = rawVal;
+                adj2(end+1)        = adjVal;
+        end
+        % --- FIXED ECHO: print the full tagged string ---
+        fprintf("%s  →  %s\n", datestr(ts,"HH:MM:SS.FFF"), txt);
+    end
+    pause(0.1);
+end
+%% 6) Plot raw roll for both slaves
+figure('Name','Raw Roll','NumberTitle','off');
+hold on;
+if ~isempty(raw1), plot(timestamps1, raw1, '-o','LineWidth',1.5); end
+if ~isempty(raw2), plot(timestamps2, raw2, '-x','LineWidth',1.5); end
+hold off;
+% --- FIXED LEGEND BUILDING ---
+leg = {};
+if ~isempty(raw1), leg{end+1} = 'S1 Raw'; end
+if ~isempty(raw2), leg{end+1} = 'S2 Raw'; end
+legend(leg,'Location','best');
+xlabel('Time'); ylabel('Raw Roll (°)');
+title(sprintf('Recorded %.1f s of Raw Roll', recordTime));
+grid on;
+%% 7) Plot adjusted roll for both slaves
+figure('Name','Adjusted Roll','NumberTitle','off');
+hold on;
+if ~isempty(adj1), plot(timestamps1, adj1, '-o','LineWidth',1.5); end
+if ~isempty(adj2), plot(timestamps2, adj2, '-x','LineWidth',1.5); end
+hold off;
+% --- FIXED LEGEND BUILDING ---
+leg = {};
+if ~isempty(adj1), leg{end+1} = 'S1 Adj'; end
+if ~isempty(adj2), leg{end+1} = 'S2 Adj'; end
+legend(leg,'Location','best');
+xlabel('Time'); ylabel('Adjusted Roll (°)');
+title(sprintf('Recorded %.1f s of Adjusted Roll', recordTime));
+grid on;
+%% 8) Save to CSV (one per slave)
+if ~isempty(raw1)
+    T1 = table(timestamps1', raw1', adj1', 'VariableNames',{'Time','RawRoll','AdjRoll'});
+    writetable(T1,'roll_data_S1.csv');
+end
+if ~isempty(raw2)
+    T2 = table(timestamps2', raw2', adj2', 'VariableNames',{'Time','RawRoll','AdjRoll'});
+    writetable(T2,'roll_data_S2.csv');
+end
+disp('Data saved to roll_data_S1.csv and roll_data_S2.csv');
+%% 9) Autoencoder anomaly detection (per slave)
+hiddenSize = 10;
+if ~isempty(adj1)
+    X1   = (adj1 - mean(adj1)) / std(adj1);
+    ae1  = trainAutoencoder(X1', hiddenSize, ...
+             'L2WeightRegularization',0.001, ...
+             'SparsityRegularization',4, ...
+             'SparsityProportion',0.05, ...
+             'DecoderTransferFunction','purelin');
+    rec1 = predict(ae1, X1');
+    mse1 = (X1' - rec1).^2;
+    thr1 = mean(mse1) + 3*std(mse1);
+    figure('Name','Anomaly S1','NumberTitle','off');
+    plot(timestamps1, mse1, '-o'); hold on;
+    yline(thr1,'r--','Threshold'); datetick('x','HH:MM:SS');
+    xlabel('Time'); ylabel('Error'); title('S1 Autoencoder Errors'); grid on;
+    figure('Name','Anomalies S1','NumberTitle','off');
+    plot(timestamps1, adj1, '-b'); hold on;
+    scatter(timestamps1(mse1>thr1), adj1(mse1>thr1), 'ro','filled');
+    datetick('x','HH:MM:SS');
+    xlabel('Time'); ylabel('Adj Roll'); title('S1 Detected Anomalies'); grid on;
+end
+if ~isempty(adj2)
+    X2   = (adj2 - mean(adj2)) / std(adj2);
+    ae2  = trainAutoencoder(X2', hiddenSize, ...
+             'L2WeightRegularization',0.001, ...
+             'SparsityRegularization',4, ...
+             'SparsityProportion',0.05, ...
+             'DecoderTransferFunction','purelin');
+    rec2 = predict(ae2, X2');
+    mse2 = (X2' - rec2).^2;
+    thr2 = mean(mse2) + 3*std(mse2);
+    figure('Name','Anomaly S2','NumberTitle','off');
+    plot(timestamps2, mse2, '-o'); hold on;
+    yline(thr2,'r--','Threshold'); datetick('x','HH:MM:SS');
+    xlabel('Time'); ylabel('Error'); title('S2 Autoencoder Errors'); grid on;
+    figure('Name','Anomalies S2','NumberTitle','off');
+    plot(timestamps2, adj2, '-b'); hold on;
+    scatter(timestamps2(mse2>thr2), adj2(mse2>thr2), 'ro','filled');
+    datetick('x','HH:MM:SS');
+    xlabel('Time'); ylabel('Adj Roll'); title('S2 Detected Anomalies'); grid on;
+end
