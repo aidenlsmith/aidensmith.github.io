@@ -1,0 +1,68 @@
+# Operational Security Systems & Analytics – GE HealthCare
+
+## Overview
+
+Supported operational security systems and built analytics tools in a regulated healthcare environment, focusing on device integrity, risk visibility, and automation of decision-support workflows.
+
+---
+
+## Security Platform Administration – Device Hardening & Lifecycle Support
+
+Worked within a security device management platform to support camera and endpoint integrity across distributed sites.
+
+* Rotated credentials and enforced password hygiene policies across managed camera devices
+* Executed firmware upgrades to ensure devices remained compliant and secure
+* Onboarded new cameras and network-connected devices into the management platform
+* Hardened device configurations by applying security best practices and disabling unnecessary services
+* Deployed and managed monitoring agents to ensure continuous device visibility and compliance
+* Validated device status and configuration changes to maintain operational continuity
+
+**Engineering Focus:**
+
+* Device lifecycle management
+* Configuration control
+* Firmware validation
+* Networked device security
+* Operational reliability
+
+---
+
+## Security Risk Scoring & Decision Support Application (Python + Streamlit)
+
+Designed and implemented a multi-factor risk scoring application to support Regional Security Directors in prioritizing response actions for upcoming events.
+
+* Developed a weighted risk model incorporating event attributes, site exposure, operational factors, and environmental conditions
+* Calculated dynamic risk scores based on multiple contributing inputs
+* Identified and displayed top risk drivers to improve transparency of scoring logic
+* Generated recommended mitigation actions aligned to risk thresholds
+* Built an interactive web application using **Python and Streamlit** to visualize scores, drivers, and recommended actions in real time
+* Structured the system to allow additional data inputs and model tuning
+
+**Engineering Focus:**
+
+* Systems modeling
+* Risk quantification
+* Multi-variable weighting logic
+* Decision-support system design
+* Lightweight application development
+
+---
+
+## Automated Operational Reporting – Power BI + Python Integration
+
+Developed automated reporting workflows to improve visibility and eliminate manual tracking.
+
+* Designed Power BI dashboards to visualize operational metrics and site-level performance indicators
+* Built a Python “watchdog” script to monitor a designated directory for newly generated Excel files
+* Implemented logic to automatically detect the latest file and ensure Power BI connected to the most recent dataset
+* Reduced manual file updates and minimized risk of outdated reporting inputs
+* Structured reporting models for consistent refresh behavior and stakeholder clarity
+
+**Engineering Focus:**
+
+* Workflow automation
+* Data pipeline monitoring
+* Process reliability
+* Requirements translation into reporting architecture
+
+---
