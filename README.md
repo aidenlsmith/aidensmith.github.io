@@ -37,5 +37,5 @@ Python | MATLAB | Power BI | BLE Systems
 
 ## Contact
 aidenity02@gmail.com
-LinkedIn: (your link here)  
-Email: (your professional email)
+LinkedIn: www.linkedin.com/in/aiden-smith02 
+Email: aidenity02@gmail.com
